@@ -93,7 +93,7 @@ async fn main(spawner: Spawner) {
         address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 1, 100), 24), // Pick a free IP
         gateway: Some(Ipv4Address::new(192, 168, 1, 1)),               // Your router IP
         dns_servers: heapless::Vec::from_slice(&[
-            Ipv4Address::new(8, 8, 8, 8) // Use Google DNS instead of Pi-hole for now
+            Ipv4Address::new(8, 8, 8, 8) // Use Google DNS instead of router's (pi-hole) for now
         ]).unwrap(),
     });
     
@@ -111,14 +111,17 @@ async fn main(spawner: Spawner) {
 
     info!("Joining WiFi...");
     loop {
-        // 2. Handle the result instead of unwrap()
+        let mut failures = 0;
         match control.join_wpa2(wifi_ssid, wifi_password).await {
             Ok(_) => {
                 info!("Join successful!");
-                break; // Exit loop on success
+                break
             }
             Err(e) => {
-                // Status 1 / Auth 5 will end up here
+                failures += 1;
+                if failures >= 5 {
+                    panic!("Maximum retries exceeded. Device failed to join WiFi. Exiting...");
+                }
                 warn!("Join failed with status={}. Retrying in 5s...", e.status);
                 embassy_time::Timer::after_secs(5).await;
             }
