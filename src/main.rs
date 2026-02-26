@@ -147,7 +147,7 @@ async fn main(spawner: Spawner) {
         let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
 
         let broker_host = env!("MQTT_BROKER_HOST");
-        let port = env!("MQTT_BROKER_PORT");
+        let port = env!("MQTT_BROKER_PORT").parse().expect("Port must be a number");
         let broker_ip = Ipv4Address::from_str(broker_host).expect("Invalid IP");
         let endpoint = (broker_ip, port);
 
@@ -159,20 +159,15 @@ async fn main(spawner: Spawner) {
         }
         info!("TCP Connected.");
 
-        // 2. Configure MQTT with Keep-Alive and Last Will
         let mut config: ClientConfig<'_, 5, CountingRng> = ClientConfig::new(
             rust_mqtt::client::client_config::MqttVersion::MQTTv5,
             CountingRng(seed),
         );
         config.add_client_id(CLIENT_ID);
-        // config.set_keep_alive(60); // Send pings every 60s
-
-        // Last Will: If Pico drops, Broker publishes "OFFLINE" to stat topic
-        // Last Will: Only 3 arguments needed
         config.add_will(
             "stat/node-0/power",
             "OFFLINE".as_bytes(),
-            false // retain
+            false,
         );
 
         let mut client = MqttClient::new(
@@ -190,8 +185,8 @@ async fn main(spawner: Spawner) {
         }
 
         // 3. Subscriptions
-        let command_topic = "cmnd/node-0/power";
-        let status_topic = "stat/node-0/power";
+        let command_topic = format!("cmnd/{}/power", env!("DEVICE_ID"));
+        let status_topic = format!("stat/{}/power", env!("DEVICE_ID"));
         
         if let Err(e) = client.subscribe_to_topic(command_topic).await {
             error!("Subscribe error: {:?}", e);
