@@ -5,27 +5,31 @@ use core::str::FromStr;
 use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_net::{Config as NetConfig, DhcpConfig, Stack, StackResources};
+use embassy_net::tcp::TcpSocket;
+use embassy_net::{Config as NetConfig, DhcpConfig, Ipv4Address, Ipv4Cidr, Stack, StackResources};
 use embassy_rp::bind_interrupts;
+use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_25, PIO0};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Timer};
+use rand_core::RngCore;
+use rust_mqtt::client::client::MqttClient;
+use rust_mqtt::client::client_config::ClientConfig;
+use rust_mqtt::utils::rng_generator::CountingRng;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
-
-use embassy_rp::clocks::RoscRng;
-use rand_core::RngCore;
-
+use rust_mqtt::packet::v5::publish_packet::QualityOfService;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
 });
 
+// this is to set the desired state of spinlock 31 for the HAL;
+// needs unsafe because we're running with no checks before RAM initialization;
+// this helps for warm resets
 #[cortex_m_rt::pre_init]
 unsafe fn before_main() {
-    // Soft-reset doesn't clear spinlocks. Clear the one used by critical-section
-    // before we hit main to avoid deadlocks when using a debugger
     embassy_rp::pac::SIO.spinlock(31).write_value(1);
 }
 
@@ -51,8 +55,6 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     let mut led = Output::new(p.PIN_22, Level::Low);
 
-    // Configure PIO and CYW43
-
     let fw = include_bytes!(".././43439A0.bin");
     let clm = include_bytes!(".././43439A0_clm.bin");
     let pwr = Output::new(p.PIN_23, Level::Low);
@@ -75,110 +77,159 @@ async fn main(spawner: Spawner) {
 
     control.init(clm).await;
     control
-        .set_power_management(cyw43::PowerManagementMode::PowerSave)
+        .set_power_management(cyw43::PowerManagementMode::Performance)
         .await;
 
     let seed: u64 = RoscRng.next_u64();
-    info!("Random seed value seeded to {=u64:#X}", seed);
-
     let wifi_ssid = env!("WIFI_SSID");
     let wifi_password = env!("WIFI_PASSWORD");
-    const SERVER_NAME: &str = "google.com";
-    const CLIENT_NAME: &str = "picow";
+    const CLIENT_ID: &str = "node-0";
 
     let mut dhcp_config = DhcpConfig::default();
-    dhcp_config.hostname = Some(heapless::String::from_str(CLIENT_NAME).unwrap());
-    let net_config = NetConfig::dhcpv4(dhcp_config);
+    dhcp_config.hostname = Some(heapless::String::from_str(CLIENT_ID).unwrap());
+    // let net_config = NetConfig::dhcpv4(dhcp_config);
+    // need to use this for now because pi-hole complicating things:
+    let net_config = NetConfig::ipv4_static(embassy_net::StaticConfigV4 {
+        address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 1, 100), 24), // Pick a free IP
+        gateway: Some(Ipv4Address::new(192, 168, 1, 1)),               // Your router IP
+        dns_servers: heapless::Vec::from_slice(&[
+            Ipv4Address::new(8, 8, 8, 8) // Use Google DNS instead of Pi-hole for now
+        ]).unwrap(),
+    });
+    
 
     static STACK: StaticCell<Stack<cyw43::NetDriver<'static>>> = StaticCell::new();
-    static RESOURCES: StaticCell<StackResources<4>> = StaticCell::new(); // Increase this if you start getting socket ring errors.
+    static RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
     let stack = &*STACK.init(Stack::new(
         net_device,
         net_config,
         RESOURCES.init(StackResources::<4>::new()),
         seed,
     ));
-    let mac_addr = stack.hardware_address();
-    info!("Hardware configured. MAC Address is {}", mac_addr);
 
-    unwrap!(spawner.spawn(net_task(stack))); // Start networking services thread
+    unwrap!(spawner.spawn(net_task(stack)));
 
-    control.join_wpa2(wifi_ssid, wifi_password).await.unwrap();
-
-    // let start = Instant::now().as_millis();
-    // loop {
-    //     let elapsed = Instant::now().as_millis() - start;
-    //     if elapsed > 10000 {
-    //         core::panic!("Couldn't get network up after 10 seconds");
-    //     } else if stack.is_config_up() {
-    //         info!("Network stack config completed after about {} ms", elapsed);
-    //         break;
-    //     } else {
-    //         Timer::after_millis(10).await;
-    //     }
-    // }
-    info!("Waiting for DHCP...");
-    let start = Instant::now().as_millis();
+    info!("Joining WiFi...");
     loop {
-        let elapsed = Instant::now().as_millis() - start;
-        if elapsed > 15000 { // Increased to 15s for slower routers
-            core::panic!("Couldn't get network up after 15 seconds");
-        }
-    
-        if let Some(config) = stack.config_v4() {
-            if !config.dns_servers.is_empty() {
-                info!("Network stack ready (IP: {}, DNS: {}) after {} ms", 
-                    config.address, config.dns_servers[0], elapsed);
-                break;
-            }
-        }
-        Timer::after_millis(200).await; // Give the net_task more time to process packets
-    }
-    
-    // Add one final "settle" delay
-    Timer::after_millis(500).await;
-
-    match stack.config_v4() {
-        Some(a) => info!("IP Address appears to be: {}", a.address),
-        None => core::panic!("DHCP completed but no IP address was assigned!"),
-    }
-
-    // let server_address = stack
-    //     .dns_query(SERVER_NAME, embassy_net::dns::DnsQueryType::A)
-    //     .await
-    //     .unwrap();
-
-    let mut server_address = None;
-    for _ in 0..10 { // Try 10 times
-        match stack.dns_query(SERVER_NAME, embassy_net::dns::DnsQueryType::A).await {
-            Ok(addrs) => {
-                server_address = Some(addrs);
-                break;
+        // 2. Handle the result instead of unwrap()
+        match control.join_wpa2(wifi_ssid, wifi_password).await {
+            Ok(_) => {
+                info!("Join successful!");
+                break; // Exit loop on success
             }
             Err(e) => {
-                warn!("DNS query failed: {:?}. Retrying...", e);
-                Timer::after_secs(1).await;
+                // Status 1 / Auth 5 will end up here
+                warn!("Join failed with status={}. Retrying in 5s...", e.status);
+                embassy_time::Timer::after_secs(5).await;
             }
         }
     }
-    
-    let server_address = server_address.expect("Failed to resolve DNS after retries");
-    
-    let dest = server_address.first().unwrap().clone();
-    info!(
-        "Our server named {} resolved to the address {}",
-        SERVER_NAME, dest
-    );
+
+    info!("Waiting for DHCP...");
+    loop {
+        if let Some(config) = stack.config_v4() {
+            info!("IP Address: {}", config.address);
+            break;
+        }
+        Timer::after_millis(200).await;
+    }
+    // --- MQTT INFRASTRUCTURE ---
+    // These buffers must live outside the reconnection loop
+    let mut mqtt_rx_buffer = [0; 1024];
+    let mut mqtt_tx_buffer = [0; 1024];
 
     loop {
-        info!("external LED on, onboard LED off!");
-        led.set_high();
-        control.gpio_set(0, false).await;
-        Timer::after(Duration::from_secs(1)).await;
+        // 1. Fresh TCP Socket for every connection attempt
+        let mut rx_buffer = [0; 4096];
+        let mut tx_buffer = [0; 4096];
+        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
 
-        info!("external LED off, onboard LED on!");
-        led.set_low();
-        control.gpio_set(0, true).await;
-        Timer::after(Duration::from_secs(1)).await;
+        let broker_host = "192.168.1.2"; 
+        let port = 1883;
+        let broker_ip = Ipv4Address::from_str(broker_host).expect("Invalid IP");
+        let endpoint = (broker_ip, port);
+
+        info!("Attempting TCP Connection...");
+        if let Err(e) = socket.connect(endpoint).await {
+            error!("TCP Connect error: {:?}. Retrying in 5s...", e);
+            Timer::after_secs(5).await;
+            continue;
+        }
+        info!("TCP Connected.");
+
+        // 2. Configure MQTT with Keep-Alive and Last Will
+        let mut config: ClientConfig<'_, 5, CountingRng> = ClientConfig::new(
+            rust_mqtt::client::client_config::MqttVersion::MQTTv5,
+            CountingRng(seed),
+        );
+        config.add_client_id(CLIENT_ID);
+        // config.set_keep_alive(60); // Send pings every 60s
+
+        // Last Will: If Pico drops, Broker publishes "OFFLINE" to stat topic
+        // Last Will: Only 3 arguments needed
+        config.add_will(
+            "stat/node-0/power",
+            "OFFLINE".as_bytes(),
+            false // retain
+        );
+
+        let mut client = MqttClient::new(
+            socket,
+            &mut mqtt_tx_buffer, 1024,
+            &mut mqtt_rx_buffer, 1024,
+            config,
+        );
+
+        info!("Connecting to MQTT Broker...");
+        if let Err(e) = client.connect_to_broker().await {
+            error!("MQTT Connect error: {:?}. Retrying...", e);
+            Timer::after_secs(5).await;
+            continue;
+        }
+
+        // 3. Subscriptions
+        let command_topic = "cmnd/node-0/power";
+        let status_topic = "stat/node-0/power";
+        
+        if let Err(e) = client.subscribe_to_topic(command_topic).await {
+            error!("Subscribe error: {:?}", e);
+            continue; 
+        }
+        
+        // Publish initial state so server knows we are online
+        let _ = client.send_message(status_topic, "OFF".as_bytes(), QualityOfService::QoS1, false).await;
+        
+        info!("MQTT Ready. Listening for commands...");
+
+        // 4. Inner Message Processing Loop
+        loop {
+            // receive_message() handles PINGs internally based on set_keep_alive
+            match client.receive_message().await {
+                Ok((topic, payload)) => {
+                    let msg = core::str::from_utf8(payload).unwrap_or("").trim();
+                    info!("Topic: {}, Payload: {}", topic, msg);
+
+                    match msg {
+                        "ON" => {
+                            led.set_high();
+                            control.gpio_set(0, true).await;
+                            let _ = client.send_message(status_topic, "ON".as_bytes(), QualityOfService::QoS1, false).await;
+                        }
+                        "OFF" => {
+                            led.set_low();
+                            control.gpio_set(0, false).await;
+                            let _ = client.send_message(status_topic, "OFF".as_bytes(), QualityOfService::QoS1, false).await;
+                        }
+                        _ => warn!("Unknown command: {}", msg),
+                    }
+                }
+                Err(e) => {
+                    warn!("Connection lost: {:?}. Reconnecting...", e);
+                    break; // Break inner loop to trigger outer loop reconnection
+                }
+            }
+        }
+        
+        Timer::after_secs(1).await;
     }
 }

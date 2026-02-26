@@ -5,7 +5,5 @@ target = "thumbv6m-none-eabi"
 
 [env]
 DEFMT_LOG = "info"
-# WIFI_SSID = "*borat voice* my wifi"
-# WIFI_PASSWORD = "2034517528"
-WIFI_SSID = "Riley"
-WIFI_PASSWORD = "hernandez"
+WIFI_SSID = "Caldo HQ 2.4"
+WIFI_PASSWORD = "Caldo2025"
