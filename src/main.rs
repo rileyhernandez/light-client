@@ -51,10 +51,11 @@ async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    let relay_pin = env!("RELAY_PIN").parse::<u8>().unwrap();
+    
     info!("Program start");
     let p = embassy_rp::init(Default::default());
-    let mut led = Output::new(p.PIN_22, Level::Low);
-
+    
     let fw = include_bytes!(".././43439A0.bin");
     let clm = include_bytes!(".././43439A0_clm.bin");
     let pwr = Output::new(p.PIN_23, Level::Low);
@@ -165,7 +166,7 @@ async fn main(spawner: Spawner) {
         );
         config.add_client_id(CLIENT_ID);
         config.add_will(
-            "stat/node-0/power",
+            format!("stat/{}/power", env!("DEVICE_ID")),
             "OFFLINE".as_bytes(),
             false,
         );
@@ -184,7 +185,6 @@ async fn main(spawner: Spawner) {
             continue;
         }
 
-        // 3. Subscriptions
         let command_topic = format!("cmnd/{}/power", env!("DEVICE_ID"));
         let status_topic = format!("stat/{}/power", env!("DEVICE_ID"));
         
@@ -193,28 +193,24 @@ async fn main(spawner: Spawner) {
             continue; 
         }
         
-        // Publish initial state so server knows we are online
+        // push initial state so server knows we are online
         let _ = client.send_message(status_topic, "OFF".as_bytes(), QualityOfService::QoS1, false).await;
         
         info!("MQTT Ready. Listening for commands...");
-
-        // 4. Inner Message Processing Loop
         loop {
-            // receive_message() handles PINGs internally based on set_keep_alive
             match client.receive_message().await {
                 Ok((topic, payload)) => {
                     let msg = core::str::from_utf8(payload).unwrap_or("").trim();
                     info!("Topic: {}, Payload: {}", topic, msg);
-
                     match msg {
                         "ON" => {
                             led.set_high();
-                            control.gpio_set(0, true).await;
+                            control.gpio_set(relay_pin, true).await;
                             let _ = client.send_message(status_topic, "ON".as_bytes(), QualityOfService::QoS1, false).await;
                         }
                         "OFF" => {
                             led.set_low();
-                            control.gpio_set(0, false).await;
+                            control.gpio_set(relay_pin, false).await;
                             let _ = client.send_message(status_topic, "OFF".as_bytes(), QualityOfService::QoS1, false).await;
                         }
                         _ => warn!("Unknown command: {}", msg),
@@ -222,7 +218,7 @@ async fn main(spawner: Spawner) {
                 }
                 Err(e) => {
                     warn!("Connection lost: {:?}. Reconnecting...", e);
-                    break; // Break inner loop to trigger outer loop reconnection
+                    break;
                 }
             }
         }
@@ -230,3 +226,4 @@ async fn main(spawner: Spawner) {
         Timer::after_secs(1).await;
     }
 }
+
