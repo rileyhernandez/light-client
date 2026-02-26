@@ -1,3 +1,4 @@
 # Cargo build artifacts
 /target/
 **/.idea
+.cargo/config.toml
