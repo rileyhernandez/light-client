@@ -110,8 +110,8 @@ async fn main(spawner: Spawner) {
     unwrap!(spawner.spawn(net_task(stack)));
 
     info!("Joining WiFi...");
+    let mut failures = 0;
     loop {
-        let mut failures = 0;
         match control.join_wpa2(wifi_ssid, wifi_password).await {
             Ok(_) => {
                 info!("Join successful!");
@@ -136,19 +136,18 @@ async fn main(spawner: Spawner) {
         }
         Timer::after_millis(200).await;
     }
-    // --- MQTT INFRASTRUCTURE ---
-    // These buffers must live outside the reconnection loop
+    
     let mut mqtt_rx_buffer = [0; 1024];
     let mut mqtt_tx_buffer = [0; 1024];
 
     loop {
-        // 1. Fresh TCP Socket for every connection attempt
+        // making a fresh tcp socket for every connection attempt
         let mut rx_buffer = [0; 4096];
         let mut tx_buffer = [0; 4096];
         let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
 
-        let broker_host = "192.168.1.2"; 
-        let port = 1883;
+        let broker_host = env!("MQTT_BROKER_HOST");
+        let port = env!("MQTT_BROKER_PORT");
         let broker_ip = Ipv4Address::from_str(broker_host).expect("Invalid IP");
         let endpoint = (broker_ip, port);
 

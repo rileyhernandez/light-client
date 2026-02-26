@@ -7,3 +7,5 @@ target = "thumbv6m-none-eabi"
 DEFMT_LOG = "info"
 WIFI_SSID = "Caldo HQ 2.4"
 WIFI_PASSWORD = "Caldo2025"
+MQTT_BROKER_ADDRESS = "192.168.1.2"
+MQTT_BROKER_PORT = 1883
